@@ -54,20 +54,24 @@ def _reload_nginx():
         )
         if result.returncode == 0:
             logger.info("Nginx reloaded successfully")
-        else:
-            logger.error(f"Nginx reload failed: {result.stderr}")
-            raise RuntimeError(f"Nginx reload failed: {result.stderr}")
+            return
+        logger.error(f"Nginx reload failed: {result.stderr}")
+        raise RuntimeError(f"Nginx reload failed: {result.stderr}")
     except FileNotFoundError:
-        # If nginx binary isn't local, try via Docker exec
-        logger.info("Nginx binary not found locally, trying docker exec...")
-        result = subprocess.run(
-            ["docker", "exec", "nginx", "nginx", "-s", "reload"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            logger.info("Nginx reloaded via docker exec")
-        else:
-            logger.error(f"Nginx reload via docker failed: {result.stderr}")
-            raise RuntimeError(f"Nginx reload failed: {result.stderr}")
+        # No local nginx binary — talk to the nginx container via the Docker SDK.
+        # The Docker daemon socket is mounted into the orchestrator container.
+        logger.info("Nginx binary not found locally, using Docker SDK...")
+        try:
+            import docker
+            client = docker.from_env()
+            container = client.containers.get(os.environ.get("NGINX_CONTAINER", "nginx"))
+            exit_code, output = container.exec_run(["nginx", "-s", "reload"])
+            if exit_code == 0:
+                logger.info("Nginx reloaded via Docker SDK")
+            else:
+                msg = output.decode(errors="replace") if output else ""
+                logger.error(f"Nginx reload via Docker SDK failed: {msg}")
+                raise RuntimeError(f"Nginx reload via Docker SDK failed: {msg}")
+        except Exception as e:
+            logger.error(f"Nginx reload error: {e}")
+            raise
