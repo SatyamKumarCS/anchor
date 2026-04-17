@@ -1,9 +1,10 @@
 import logging
+from typing import Optional
 import docker
 
 logger = logging.getLogger("orchestrator.docker")
 
-_client: docker.DockerClient | None = None
+_client: Optional[docker.DockerClient] = None
 
 
 def _get_client() -> docker.DockerClient:
@@ -62,7 +63,7 @@ def is_running(name: str) -> bool:
         return False
 
 
-def get_container_ip(name: str) -> str | None:
+def get_container_ip(name: str) -> Optional[str]:
     """Get the IP address of a container on the default network."""
     client = _get_client()
     try:
