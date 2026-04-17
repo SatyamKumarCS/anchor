@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: anchorctl
+Version: 0.1.0
+Summary: Zero-downtime deployment orchestrator — Terraform-style Blue/Green deploys with automated rollback.
+License: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: click>=8.1
+Requires-Dist: httpx>=0.28
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: orchestrator
+Requires-Dist: fastapi>=0.115; extra == "orchestrator"
+Requires-Dist: uvicorn[standard]>=0.34; extra == "orchestrator"
+Requires-Dist: python-statemachine>=2.5; extra == "orchestrator"
+Requires-Dist: jinja2>=3.1; extra == "orchestrator"
+Requires-Dist: docker>=7.1; extra == "orchestrator"
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
