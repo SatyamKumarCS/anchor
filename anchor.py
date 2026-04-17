@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-anchor — Zero-downtime deployment orchestrator CLI.
+anchorctl — Zero-downtime deployment orchestrator CLI.
 
 Declarative Blue/Green deploys with automated rollback.
 Terraform-inspired command interface for the Anchor orchestrator service.
@@ -9,6 +9,7 @@ Terraform-inspired command interface for the Anchor orchestrator service.
 import os
 import sys
 import json
+from pathlib import Path
 
 import click
 import httpx
@@ -17,11 +18,46 @@ import yaml
 __version__ = "0.1.0"
 
 ORCHESTRATOR_URL = os.environ.get("ANCHOR_HOST", "http://localhost:8080")
+ANCHOR_DIR_NAME = ".anchor"
+CONFIG_FILE_NAME = "config.yml"
+LEGACY_CONFIG_NAME = "deploy.yml"
 
 BANNER = r"""
-  ⚓  Anchor v{}
+  ⚓  anchorctl v{}
   Zero-downtime deployment orchestrator
 """.format(__version__)
+
+
+# ── .anchor/ discovery (git-style) ─────────────────────────────────
+
+def find_anchor_root(start: Path | None = None) -> Path | None:
+    """Walk up from `start` (or CWD) looking for a .anchor/ directory.
+    Returns the project root (parent of .anchor/) or None if not found.
+    """
+    cur = (start or Path.cwd()).resolve()
+    for parent in [cur, *cur.parents]:
+        if (parent / ANCHOR_DIR_NAME).is_dir():
+            return parent
+    return None
+
+
+def resolve_config_path(explicit: str | None) -> str:
+    """Resolve which config file to use.
+
+    Priority:
+      1. --config flag (explicit) — used as-is
+      2. .anchor/config.yml (walking up from CWD, like git)
+      3. ./deploy.yml (legacy fallback, backward compat)
+    """
+    if explicit:
+        return explicit
+    root = find_anchor_root()
+    if root:
+        return str(root / ANCHOR_DIR_NAME / CONFIG_FILE_NAME)
+    if Path(LEGACY_CONFIG_NAME).exists():
+        return LEGACY_CONFIG_NAME
+    # No project found — return the path we'd expect, let caller error nicely
+    return str(Path.cwd() / ANCHOR_DIR_NAME / CONFIG_FILE_NAME)
 
 # ── Default deploy.yml template ──────────────────────────────────────────────
 
@@ -63,7 +99,7 @@ def _api(method: str, path: str, **kwargs) -> dict:
     except httpx.ConnectError:
         click.secho(f"  ✗ Cannot connect to orchestrator at {ORCHESTRATOR_URL}", fg="red")
         click.echo("  Hint: Is the orchestrator running? (docker compose up)")
-        click.echo(f"  Override with: ANCHOR_HOST=http://your-host:port anchor <command>")
+        click.echo(f"  Override with: ANCHOR_HOST=http://your-host:port anchorctl <command>")
         sys.exit(1)
 
 
@@ -81,10 +117,10 @@ STATE_STYLE = {
 # ── CLI Group ────────────────────────────────────────────────────────────────
 
 @click.group(invoke_without_command=True)
-@click.version_option(__version__, "--version", "-v", prog_name="anchor")
+@click.version_option(__version__, "--version", "-v", prog_name="anchorctl")
 @click.pass_context
 def cli(ctx):
-    """⚓  Anchor — Zero-downtime deployment orchestrator.
+    """⚓  anchorctl — Zero-downtime deployment orchestrator.
 
     Declarative Blue/Green deploys with automated rollback.
     """
@@ -93,20 +129,60 @@ def cli(ctx):
         click.echo(ctx.get_help())
 
 
-# ── anchor init ──────────────────────────────────────────────────────────────
+# ── Local config loader (used by plan & apply for client-side validation) ───
+
+def _load_config_local(path: str) -> dict:
+    """Load and validate a config file. Exits on error with friendly message."""
+    try:
+        from orchestrator.config_parser import load_config
+    except ImportError:
+        # Fall back to plain YAML parsing when orchestrator package isn't
+        # available (e.g. when installed via Homebrew without the server side).
+        try:
+            with open(path) as f:
+                return yaml.safe_load(f)
+        except FileNotFoundError:
+            click.secho(f"  ✗ Config file not found: {path}", fg="red")
+            click.echo("  Hint: Run 'anchorctl init' to create one.")
+            sys.exit(1)
+        except yaml.YAMLError as e:
+            click.secho(f"  ✗ Config error: {e}", fg="red")
+            sys.exit(1)
+
+    try:
+        return load_config(path)
+    except FileNotFoundError:
+        click.secho(f"  ✗ Config file not found: {path}", fg="red")
+        click.echo("  Hint: Run 'anchorctl init' to create one.")
+        sys.exit(1)
+    except ValueError as e:
+        click.secho(f"  ✗ Config error: {e}", fg="red")
+        sys.exit(1)
+
+
+# ── anchorctl init ──────────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--output", "-o", default="deploy.yml", help="Output file path")
 @click.option("--non-interactive", is_flag=True, help="Use defaults without prompting")
-def init(output, non_interactive):
-    """Scaffold a new deploy.yml in the current directory."""
-    if os.path.exists(output):
-        if not click.confirm(f"  ⚠  {output} already exists. Overwrite?", default=False):
+@click.option("--force", "-f", is_flag=True, help="Overwrite existing .anchor/ without confirmation")
+def init(non_interactive, force):
+    """Initialize a new anchorctl project in the current directory.
+
+    Creates a .anchor/ directory (like .git/) with config.yml inside.
+    """
+    project_root = Path.cwd()
+    anchor_dir = project_root / ANCHOR_DIR_NAME
+    config_path = anchor_dir / CONFIG_FILE_NAME
+
+    if anchor_dir.exists() and not force:
+        if not click.confirm(
+            f"  ⚠  {anchor_dir} already exists. Reinitialize?", default=False
+        ):
             click.echo("  Aborted.")
             return
 
     click.echo(BANNER)
-    click.secho("  Initializing new deployment config...\n", fg="cyan")
+    click.secho("  Initializing new anchorctl project...\n", fg="cyan")
 
     if non_interactive:
         values = {
@@ -127,45 +203,42 @@ def init(output, non_interactive):
             "threshold": click.prompt("  Rollback error threshold (0-1)", default=0.01, type=float),
         }
 
-    content = DEFAULT_DEPLOY_YML.format(**values)
-
-    with open(output, "w") as f:
-        f.write(content)
+    anchor_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(DEFAULT_DEPLOY_YML.format(**values))
+    (anchor_dir / "HEAD").write_text(
+        "This directory is managed by anchorctl. Do not edit by hand.\n"
+        "Edit config.yml to change deployment settings.\n"
+    )
+    gitignore = anchor_dir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("state.db\nstate.db-journal\nstate.db-wal\nstate.db-shm\n")
 
     click.echo()
-    click.secho(f"  ✓ Created {output}", fg="green", bold=True)
+    click.secho(
+        f"  ✓ Initialized empty anchorctl project in {anchor_dir}/",
+        fg="green",
+        bold=True,
+    )
     click.echo()
     click.echo("  Next steps:")
-    click.echo(f"    1. Review {output}")
-    click.echo("    2. anchor plan        — preview the deployment")
-    click.echo("    3. anchor apply       — deploy for real")
+    click.echo("    1. Review .anchor/config.yml")
+    click.echo("    2. docker compose up    — start infrastructure")
+    click.echo("    3. anchorctl plan       — preview the deployment")
+    click.echo("    4. anchorctl apply      — deploy for real")
     click.echo()
 
 
-# ── anchor plan ──────────────────────────────────────────────────────────────
+# ── anchorctl plan ──────────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--config", "-c", default="deploy.yml", help="Path to deploy.yml")
+@click.option("--config", "-c", default=None, help="Path to config.yml (overrides .anchor/ discovery)")
 def plan(config):
     """Show deployment plan without making changes."""
     click.echo(BANNER)
 
-    try:
-        from orchestrator.config_parser import load_config
-    except ImportError:
-        click.secho("  ✗ Cannot import orchestrator package.", fg="red")
-        click.echo("  Hint: Run from the anchor project root, or pip install -e .")
-        sys.exit(1)
+    config = resolve_config_path(config)
 
-    try:
-        cfg = load_config(config)
-    except FileNotFoundError:
-        click.secho(f"  ✗ Config file not found: {config}", fg="red")
-        click.echo("  Hint: Run 'anchor init' to create one.")
-        sys.exit(1)
-    except ValueError as e:
-        click.secho(f"  ✗ Config error: {e}", fg="red")
-        sys.exit(1)
+    cfg = _load_config_local(config)
 
     app = cfg["app"]
     ports = cfg["ports"]
@@ -194,23 +267,28 @@ def plan(config):
     click.echo()
     click.secho("  ─── No changes made ──────────────────────────────", fg="yellow")
     click.echo()
-    click.echo("    Run 'anchor apply' to execute this plan.")
+    click.echo("    Run 'anchorctl apply' to execute this plan.")
     click.echo()
 
 
 # ── anchor apply ─────────────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--config", "-c", default="deploy.yml", help="Path to deploy.yml")
+@click.option("--config", "-c", default=None, help="Path to config.yml (overrides .anchor/ discovery)")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 def apply(config, yes):
     """Deploy a new version using Blue/Green strategy."""
     click.echo(BANNER)
 
+    config = resolve_config_path(config)
+
     if not os.path.exists(config):
         click.secho(f"  ✗ Config file not found: {config}", fg="red")
-        click.echo("  Hint: Run 'anchor init' to create one.")
+        click.echo("  Hint: Run 'anchorctl init' to create one.")
         sys.exit(1)
+
+    # Validate locally before sending to orchestrator
+    cfg = _load_config_local(config)
 
     if not yes:
         if not click.confirm("  Apply deployment?", default=True):
@@ -218,14 +296,16 @@ def apply(config, yes):
             return
 
     click.secho("  Deploying...", fg="cyan")
-    data = _api("POST", "/deploy", json={"config_path": config})
+    # Send parsed config inline so the orchestrator (which may run in a
+    # different filesystem, e.g. inside Docker) doesn't need to read our path.
+    data = _api("POST", "/deploy", json={"config_path": config, "config": cfg})
 
     click.echo()
     click.secho(f"  ✓ Deployment #{data['deployment_id']} started", fg="green", bold=True)
     click.echo(f"    Version:  {data['version']}")
     click.echo(f"    Status:   {data['status']}")
     click.echo()
-    click.echo("    Monitor with: anchor status")
+    click.echo("    Monitor with: anchorctl status")
     click.echo()
 
 
@@ -355,6 +435,49 @@ def history():
         click.secho(f"{state:<18}", fg=color, nl=False)
         click.echo(f" {d['active_color']:<8} {started:<22} {finished:<22}")
 
+    click.echo()
+
+
+# ── anchorctl info ──────────────────────────────────────────────────────────
+
+@cli.command()
+def info():
+    """Show project info: .anchor/ location, config path, orchestrator status."""
+    click.echo(BANNER)
+
+    root = find_anchor_root()
+    click.secho("  ─── Project ──────────────────────────────────────", bold=True)
+    click.echo()
+    if root:
+        click.echo(f"    Project root:  {root}")
+        click.echo(f"    Anchor dir:    {root / ANCHOR_DIR_NAME}")
+        config_path = root / ANCHOR_DIR_NAME / CONFIG_FILE_NAME
+        click.echo(f"    Config:        {config_path}  "
+                   f"{'✓' if config_path.exists() else '✗ missing'}")
+    else:
+        legacy = Path.cwd() / LEGACY_CONFIG_NAME
+        if legacy.exists():
+            click.echo(f"    Project root:  (legacy mode, no .anchor/)")
+            click.echo(f"    Config:        {legacy}")
+        else:
+            click.secho("    No anchorctl project found in this directory or parents.", fg="yellow")
+            click.echo("    Run 'anchorctl init' to create one.")
+
+    click.echo()
+    click.secho("  ─── Orchestrator ─────────────────────────────────", bold=True)
+    click.echo()
+    click.echo(f"    URL:           {ORCHESTRATOR_URL}")
+    try:
+        resp = httpx.get(f"{ORCHESTRATOR_URL}/health", timeout=2)
+        if resp.status_code == 200:
+            data = resp.json()
+            click.secho(f"    Status:        ● reachable", fg="green")
+            click.echo(f"    State:         {data.get('state', 'unknown')}")
+        else:
+            click.secho(f"    Status:        ✗ HTTP {resp.status_code}", fg="red")
+    except httpx.RequestError:
+        click.secho(f"    Status:        ✗ unreachable", fg="red")
+        click.echo(f"    Hint:          docker compose up")
     click.echo()
 
 

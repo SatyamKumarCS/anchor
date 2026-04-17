@@ -9,10 +9,10 @@ REQUIRED_FIELDS = {
 }
 
 
-def load_config(path: str) -> dict:
-    """Load and validate deploy.yml. Returns config dict or raises ValueError."""
-    with open(path, "r") as f:
-        config = yaml.safe_load(f)
+def validate_config(config: dict) -> dict:
+    """Validate an already-parsed config dict. Returns it or raises ValueError."""
+    if not isinstance(config, dict):
+        raise ValueError("Config must be a mapping/dict")
 
     errors = []
 
@@ -62,6 +62,13 @@ def load_config(path: str) -> dict:
         raise ValueError("Config validation failed:\n  " + "\n  ".join(errors))
 
     return config
+
+
+def load_config(path: str) -> dict:
+    """Load and validate deploy.yml. Returns config dict or raises ValueError."""
+    with open(path, "r") as f:
+        config = yaml.safe_load(f)
+    return validate_config(config)
 
 
 def print_plan(config: dict):

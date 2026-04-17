@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from orchestrator import db
-from orchestrator.config_parser import load_config, print_plan
+from orchestrator.config_parser import load_config, print_plan, validate_config
 from orchestrator.fsm import DeploymentFSM
 from orchestrator.health_prober import check_health
 from orchestrator.metrics_gate import MetricsGate
@@ -36,6 +36,11 @@ GREEN_HOST = os.environ.get("GREEN_HOST", "green")
 # --- Request Models ---
 class DeployRequest(BaseModel):
     config_path: str = "deploy.yml"
+    # Optional inline config (parsed dict). When provided, the orchestrator
+    # uses this directly instead of reading from disk. This lets the CLI
+    # (running on the host) use its own .anchor/config.yml without the
+    # orchestrator container needing access to that exact path.
+    config: dict | None = None
 
 
 class SwitchRequest(BaseModel):
@@ -202,10 +207,18 @@ def deploy(req: DeployRequest):
         )
 
     # Parse and validate config
-    try:
-        config = load_config(req.config_path)
-    except (ValueError, FileNotFoundError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    if req.config is not None:
+        # Inline config from the CLI — orchestrator container may not be able
+        # to read the host-side config_path, so the CLI sends the parsed dict.
+        try:
+            config = validate_config(req.config)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    else:
+        try:
+            config = load_config(req.config_path)
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     current_config = config
 

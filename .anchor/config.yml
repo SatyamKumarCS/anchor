@@ -1,0 +1,19 @@
+app:
+  name: myapp
+  image: myapp:v2
+
+ports:
+  blue: 8001
+  green: 8002
+
+health_check:
+  path: /health
+  timeout: 5
+  retries: 3
+
+rollback:
+  error_rate_threshold: 0.01
+  window: 120
+  poll_interval: 15
+
+strategy: bluegreen

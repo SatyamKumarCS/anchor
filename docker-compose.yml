@@ -73,6 +73,9 @@ services:
     ports:
       - "8080:8080"
     volumes:
+      # Mount the project's .anchor/ dir so config + state.db live with the project.
+      # The legacy deploy.yml mount is kept for backward compatibility.
+      - ./.anchor:/app/.anchor
       - ./deploy.yml:/app/deploy.yml:ro
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf
       - ./nginx/nginx.template.conf:/app/nginx/nginx.template.conf:ro
@@ -82,7 +85,8 @@ services:
       - GREEN_HOST=green
       - NGINX_TEMPLATE=/app/nginx/nginx.template.conf
       - NGINX_CONF=/etc/nginx/nginx.conf
-      - ORCHESTRATOR_DB=/app/state.db
+      # Persist FSM state inside the project's .anchor/ dir
+      - ORCHESTRATOR_DB=/app/.anchor/state.db
     depends_on:
       - blue
       - green
